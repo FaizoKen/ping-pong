@@ -9,8 +9,13 @@ services:
       - .env
     environment:
       PORT: "8080"
+    # Reachable by Caddy over the internal compose network as `ping-pong:8080`.
+    expose:
+      - "8080"
+    # Bind to localhost only for on-box debugging; public traffic arrives via
+    # Caddy over HTTPS, so 8080 is never exposed to the internet directly.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
@@ -18,3 +23,23 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
+
+  caddy:
+    # Terminates TLS for ping-us.faizo.net and reverse-proxies to ping-pong.
+    # host networking: Caddy binds host :80/:443 directly (no docker-proxy/NAT
+    # hop) and its sockets to Discord use the host TCP stack (BBR + Fast Open).
+    # It reaches the app via the loopback-published 127.0.0.1:8080.
+    image: caddy:2
+    container_name: caddy
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - ping-pong
+
+volumes:
+  caddy_data:
+  caddy_config:

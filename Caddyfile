@@ -1,0 +1,18 @@
+# Caddy reverse proxy with automatic HTTPS (Let's Encrypt).
+#
+# The `ping-us.faizo.net` DNS record points straight at this host (Cloudflare
+# "DNS only"), so Caddy provisions and renews a real certificate via the ACME
+# HTTP-01 / TLS-ALPN-01 challenges on ports 80/443. Certificates are persisted
+# in the `caddy_data` volume (see compose.yml) so restarts don't re-issue.
+{
+	# ACME account email — used for expiry notices and recovery.
+	email mail@faizo.net
+}
+
+ping-us.faizo.net {
+	# Caddy runs in host-network mode (see compose.yml) so its WAN-facing
+	# sockets use the host TCP stack (BBR, Fast Open) with no bridge hop; it
+	# reaches the app over loopback. No `encode` — responses are tiny JSON,
+	# below the compression threshold, so it would only add work.
+	reverse_proxy 127.0.0.1:8080
+}

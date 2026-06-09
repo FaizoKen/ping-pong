@@ -86,7 +86,9 @@ docker run -e DISCORD_PUBLIC_KEY=<public-key> -p 8080:8080 ping-pong
 
 ### Docker Compose
 
-`compose.yml` reads your `.env` and exposes port 8080 with a healthcheck:
+`compose.yml` runs two services: the `ping-pong` app (bound to `127.0.0.1:8080`
+for on-box debugging only) and **Caddy**, which terminates HTTPS on ports 80/443
+and reverse-proxies to the app. Both read your `.env` and have healthchecks.
 
 ```bash
 docker compose up -d          # pull/run the GHCR image
@@ -94,6 +96,20 @@ docker compose up -d --build  # or build locally from source
 docker compose logs -f
 docker compose down
 ```
+
+### Public HTTPS (Caddy + Let's Encrypt)
+
+Discord requires a public **HTTPS** endpoint. `Caddyfile` configures Caddy to
+serve `ping-us.faizo.net` and automatically obtain/renew a Let's Encrypt
+certificate (certs persist in the `caddy_data` volume). For this to work:
+
+- A DNS **A record** for the hostname must point at the host (here, Cloudflare
+  "DNS only" / unproxied → the server IP).
+- Ports **80 and 443** must be reachable from the internet.
+
+Point a different domain by editing the hostname (and `email`) in `Caddyfile`,
+then `docker compose up -d`. The live endpoint is then
+`https://ping-us.faizo.net/interactions`.
 
 ### Auto-built images (GitHub Actions)
 
