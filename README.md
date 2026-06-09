@@ -84,6 +84,17 @@ docker build -t ping-pong .
 docker run -e DISCORD_PUBLIC_KEY=<public-key> -p 8080:8080 ping-pong
 ```
 
+### Docker Compose
+
+`compose.yml` reads your `.env` and exposes port 8080 with a healthcheck:
+
+```bash
+docker compose up -d          # pull/run the GHCR image
+docker compose up -d --build  # or build locally from source
+docker compose logs -f
+docker compose down
+```
+
 ### Auto-built images (GitHub Actions)
 
 `.github/workflows/docker.yml` builds the image on every push to `main` and on
