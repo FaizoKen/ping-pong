@@ -106,57 +106,19 @@ async fn interactions(State(state): State<AppState>, headers: HeaderMap, body: B
             tracing::info!("handled PING -> PONG");
             Json(json!({ "type": 1 })).into_response()
         }
-        // 2 = APPLICATION_COMMAND (a slash command was invoked).
-        Some(2) => {
-            let now_ms = unix_millis() as i64;
-
-            let interaction_id = payload
-                .get("id")
-                .and_then(Value::as_str)
-                .and_then(|s| s.parse::<u64>().ok());
-
-            // Discord -> server delivery latency, derived from the snowflake.
-            let delivery_ms = interaction_id.map(|id| now_ms - snowflake_timestamp_ms(id) as i64);
-
-            // How long *we* spent verifying + parsing this request.
-            let handling = received_at.elapsed();
-            let handling_ms = handling.as_secs_f64() * 1000.0;
-
-            let delivery_str = match delivery_ms {
-                Some(ms) => format!("{ms} ms"),
-                None => "n/a".to_string(),
-            };
-            let id_str = interaction_id
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "n/a".into());
-
-            tracing::info!(
-                interaction_id = %id_str,
-                delivery_ms = ?delivery_ms,
-                handling_ms = handling_ms,
-                "handled /ping"
-            );
-
-            let content = format!(
-                concat!(
-                    "🏓 **Pong!**\n",
-                    "```\n",
-                    "Discord -> server : {delivery}\n",
-                    "Server handling   : {handling:.3} ms\n",
-                    "Interaction id    : {id}\n",
-                    "Measured at       : {now} (unix ms)\n",
-                    "```"
-                ),
-                delivery = delivery_str,
-                handling = handling_ms,
-                id = id_str,
-                now = now_ms,
-            );
-
-            // 4 = CHANNEL_MESSAGE_WITH_SOURCE.
+        // 2 = APPLICATION_COMMAND (slash command), 3 = MESSAGE_COMPONENT (button click).
+        // Both reply with a fresh latency report as a new message + a "Ping again" button.
+        Some(2) | Some(3) => {
+            let content = latency_report(&payload, received_at);
+            // 4 = CHANNEL_MESSAGE_WITH_SOURCE. flags 64 = EPHEMERAL (only the
+            // invoking user sees the reply).
             Json(json!({
                 "type": 4,
-                "data": { "content": content }
+                "data": {
+                    "content": content,
+                    "components": ping_again_components(),
+                    "flags": 64,
+                }
             }))
             .into_response()
         }
@@ -165,6 +127,71 @@ async fn interactions(State(state): State<AppState>, headers: HeaderMap, body: B
             (StatusCode::BAD_REQUEST, "unsupported interaction type").into_response()
         }
     }
+}
+
+/// Build the 🏓 latency report from any interaction payload that carries a
+/// snowflake `id` (slash commands and component clicks both do).
+fn latency_report(payload: &Value, received_at: Instant) -> String {
+    let now_ms = unix_millis() as i64;
+
+    let interaction_id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<u64>().ok());
+
+    // Discord -> server delivery latency, derived from the snowflake.
+    let delivery_ms = interaction_id.map(|id| now_ms - snowflake_timestamp_ms(id) as i64);
+
+    // How long *we* spent verifying + parsing this request.
+    let handling_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+
+    let delivery_str = match delivery_ms {
+        Some(ms) => format!("{ms} ms"),
+        None => "n/a".to_string(),
+    };
+    let id_str = interaction_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "n/a".into());
+
+    tracing::info!(
+        interaction_id = %id_str,
+        delivery_ms = ?delivery_ms,
+        handling_ms = handling_ms,
+        "handled latency request"
+    );
+
+    format!(
+        concat!(
+            "🏓 **Pong!**\n",
+            "```\n",
+            "Discord -> server : {delivery}\n",
+            "Server handling   : {handling:.3} ms\n",
+            "Interaction id    : {id}\n",
+            "Measured at       : {now} (unix ms)\n",
+            "```"
+        ),
+        delivery = delivery_str,
+        handling = handling_ms,
+        id = id_str,
+        now = now_ms,
+    )
+}
+
+/// A single action row holding the "Ping again" button.
+fn ping_again_components() -> Value {
+    json!([
+        {
+            "type": 1, // ACTION_ROW
+            "components": [
+                {
+                    "type": 2,            // BUTTON
+                    "style": 1,           // PRIMARY
+                    "label": "Ping again",
+                    "custom_id": "ping_again"
+                }
+            ]
+        }
+    ])
 }
 
 /// Verify the `Ed25519` signature Discord attaches to every request.
