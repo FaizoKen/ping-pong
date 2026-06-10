@@ -162,7 +162,7 @@ fn latency_report(
         None => "n/a".to_string(),
     };
     let rtt_str = match discord_rtt_ms {
-        Some(ms) => format!("{ms:.3} ms (TCP rtt)"),
+        Some(ms) => format!("{ms:.3} ms (TCP rtt to edge)"),
         None => "n/a".to_string(),
     };
     let source_str = source_ip.unwrap_or_else(|| "n/a".into());
@@ -201,9 +201,11 @@ fn latency_report(
 }
 
 /// Measure the network round trip toward Discord by timing a TCP handshake to
-/// `discord.com:443` (the nearest Discord edge). DNS resolution happens before
-/// the clock starts so the figure is pure connect RTT; the probe is capped so
-/// a network hiccup can't stall the interaction response.
+/// `discord.com:443`. This lands on Discord's public front door (Cloudflare
+/// edge) — the path outbound API calls take — NOT the webhook sender fleet,
+/// which silently drops inbound SYNs and so cannot be probed actively. DNS
+/// resolution happens before the clock starts so the figure is pure connect
+/// RTT; the probe is capped so a network hiccup can't stall the response.
 async fn measure_discord_rtt() -> Option<f64> {
     let probe = async {
         let addr = tokio::net::lookup_host("discord.com:443")
