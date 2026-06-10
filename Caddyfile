@@ -14,5 +14,9 @@ ping-us.faizo.net {
 	# sockets use the host TCP stack (BBR, Fast Open) with no bridge hop; it
 	# reaches the app over loopback. No `encode` — responses are tiny JSON,
 	# below the compression threshold, so it would only add work.
+	# Access log (JSON to stderr -> `docker logs caddy`): records each
+	# request's source IP and User-Agent, e.g. to confirm traffic really
+	# originates from Discord's webhook fleet.
+	log
 	reverse_proxy 127.0.0.1:8080
 }

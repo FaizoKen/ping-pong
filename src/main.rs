@@ -10,7 +10,7 @@
 //! that against our wall clock gives the Discord -> server delivery time.
 
 use std::net::SocketAddr;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     body::Bytes,
@@ -109,7 +109,17 @@ async fn interactions(State(state): State<AppState>, headers: HeaderMap, body: B
         // 2 = APPLICATION_COMMAND (slash command), 3 = MESSAGE_COMPONENT (button click).
         // Both reply with a fresh latency report as a new message + a "Ping again" button.
         Some(2) | Some(3) => {
-            let content = latency_report(&payload, received_at);
+            // Snapshot handling time before the outbound probe so the report
+            // reflects verify+parse work, not the probe's round trip.
+            let handling_ms = received_at.elapsed().as_secs_f64() * 1000.0;
+            let discord_rtt_ms = measure_discord_rtt().await;
+            // Caddy forwards the original client (Discord's webhook sender) here.
+            let source_ip = headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .map(|s| s.trim().to_string());
+            let content = latency_report(&payload, handling_ms, discord_rtt_ms, source_ip);
             // 4 = CHANNEL_MESSAGE_WITH_SOURCE. flags 64 = EPHEMERAL (only the
             // invoking user sees the reply).
             Json(json!({
@@ -131,7 +141,12 @@ async fn interactions(State(state): State<AppState>, headers: HeaderMap, body: B
 
 /// Build the 🏓 latency report from any interaction payload that carries a
 /// snowflake `id` (slash commands and component clicks both do).
-fn latency_report(payload: &Value, received_at: Instant) -> String {
+fn latency_report(
+    payload: &Value,
+    handling_ms: f64,
+    discord_rtt_ms: Option<f64>,
+    source_ip: Option<String>,
+) -> String {
     let now_ms = unix_millis() as i64;
 
     let interaction_id = payload
@@ -142,13 +157,15 @@ fn latency_report(payload: &Value, received_at: Instant) -> String {
     // Discord -> server delivery latency, derived from the snowflake.
     let delivery_ms = interaction_id.map(|id| now_ms - snowflake_timestamp_ms(id) as i64);
 
-    // How long *we* spent verifying + parsing this request.
-    let handling_ms = received_at.elapsed().as_secs_f64() * 1000.0;
-
     let delivery_str = match delivery_ms {
         Some(ms) => format!("{ms} ms"),
         None => "n/a".to_string(),
     };
+    let rtt_str = match discord_rtt_ms {
+        Some(ms) => format!("{ms:.3} ms (TCP rtt)"),
+        None => "n/a".to_string(),
+    };
+    let source_str = source_ip.unwrap_or_else(|| "n/a".into());
     let id_str = interaction_id
         .map(|id| id.to_string())
         .unwrap_or_else(|| "n/a".into());
@@ -156,6 +173,8 @@ fn latency_report(payload: &Value, received_at: Instant) -> String {
     tracing::info!(
         interaction_id = %id_str,
         delivery_ms = ?delivery_ms,
+        discord_rtt_ms = ?discord_rtt_ms,
+        source_ip = %source_str,
         handling_ms = handling_ms,
         "handled latency request"
     );
@@ -165,16 +184,40 @@ fn latency_report(payload: &Value, received_at: Instant) -> String {
             "🏓 **Pong!**\n",
             "```\n",
             "Discord -> server : {delivery}\n",
+            "Server -> Discord : {rtt}\n",
             "Server handling   : {handling:.3} ms\n",
+            "Webhook source    : {source}\n",
             "Interaction id    : {id}\n",
             "Measured at       : {now} (unix ms)\n",
             "```"
         ),
         delivery = delivery_str,
+        rtt = rtt_str,
         handling = handling_ms,
+        source = source_str,
         id = id_str,
         now = now_ms,
     )
+}
+
+/// Measure the network round trip toward Discord by timing a TCP handshake to
+/// `discord.com:443` (the nearest Discord edge). DNS resolution happens before
+/// the clock starts so the figure is pure connect RTT; the probe is capped so
+/// a network hiccup can't stall the interaction response.
+async fn measure_discord_rtt() -> Option<f64> {
+    let probe = async {
+        let addr = tokio::net::lookup_host("discord.com:443")
+            .await
+            .ok()?
+            .next()?;
+        let started = Instant::now();
+        tokio::net::TcpStream::connect(addr).await.ok()?;
+        Some(started.elapsed().as_secs_f64() * 1000.0)
+    };
+    tokio::time::timeout(Duration::from_millis(300), probe)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// A single action row holding the "Ping again" button.
