@@ -1,9 +1,24 @@
 # Caddy reverse proxy with automatic HTTPS (Let's Encrypt).
 #
-# The `ping-us.faizo.net` DNS record points straight at this host (Cloudflare
-# "DNS only"), so Caddy provisions and renews a real certificate via the ACME
-# HTTP-01 / TLS-ALPN-01 challenges on ports 80/443. Certificates are persisted
-# in the `caddy_data` volume (see compose.yml) so restarts don't re-issue.
+# The `ping-us.faizo.net` DNS record points at this host's IP in either mode:
+#   - "DNS only" (grey cloud): fastest, no Cloudflare hop. Caddy issues and
+#     renews certs via the ACME HTTP-01 / TLS-ALPN-01 challenges on 80/443.
+#   - "Proxied" (orange cloud): hides the origin IP and adds DDoS shielding;
+#     set the zone's SSL/TLS mode to "Full (strict)". HTTP-01 renewals still
+#     pass through the proxy on port 80 (TLS-ALPN-01 doesn't — Caddy falls
+#     back to HTTP-01 automatically).
+# Certificates are persisted in the `caddy_data` volume (see compose.yml) so
+# restarts don't re-issue.
+#
+# To route more hostnames to other containers on this box (the same job the
+# tunnel dashboard's "public hostname" list does), add a block per service.
+# E.g. to move api-dweeb off the tunnel: publish a loopback port in the dweeb
+# compose (127.0.0.1:4444:8080) and add
+#
+#   api-dweeb.faizo.net {
+#   	log
+#   	reverse_proxy 127.0.0.1:4444
+#   }
 {
 	# ACME account email — used for expiry notices and recovery.
 	email mail@faizo.net
