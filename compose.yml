@@ -1,3 +1,15 @@
+# Public traffic arrives through a Cloudflare Tunnel. cloudflared runs as its
+# OWN container on the host (it also serves other tunnels), so it reaches the
+# app container-to-container over this compose network (ping-pong_default).
+# Attach it once with:
+#
+#   docker network connect ping-pong_default cloudflared
+#
+# Then point the tunnel's public hostname (Zero Trust dashboard -> Networks ->
+# Tunnels -> Public Hostname) at  http://ping-pong:8080  — the container name
+# and INTERNAL port, not a host port or 127.0.0.1. (Re-run the network connect
+# if cloudflared is ever recreated.)
+
 services:
   ping-pong:
     # Use the auto-built GHCR image, or build locally with `docker compose build`.
@@ -9,23 +21,34 @@ services:
       - .env
     environment:
       PORT: "8080"
-      # Loopback-only bind: with host networking the app would otherwise
-      # listen on the public interface; only Caddy needs to reach it.
-      HOST: "127.0.0.1"
-    # Shares the host network namespace so the app can read the kernel's
-    # TCP_INFO (`ss -ti`) for the live connection Discord's webhook sender
-    # holds to Caddy — that RTT is reported in the /ping message.
-    network_mode: host
+    # Reachable by cloudflared over the compose network as `ping-pong:8080`
+    # (the tunnel ingress target — see header comment).
+    expose:
+      - "8080"
+    # Loopback bind for on-box debugging and for host-networked Caddy; public
+    # traffic arrives via the tunnel, so 8080 is never exposed to the internet.
+    ports:
+      - "127.0.0.1:8080:8080"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8080/health",
+        ]
       interval: 30s
       timeout: 3s
       retries: 3
       start_period: 5s
 
   caddy:
-    # Terminates TLS for ping-us.faizo.net and reverse-proxies to ping-pong.
+    # Legacy direct-HTTPS path (kept for fallback/debugging): terminates TLS
+    # for ping-us.faizo.net and reverse-proxies to ping-pong. Public traffic
+    # normally arrives via the Cloudflare Tunnel instead.
     # host networking: Caddy binds host :80/:443 directly (no docker-proxy/NAT
     # hop) and its sockets to Discord use the host TCP stack (BBR + Fast Open).
     # It reaches the app via the loopback-published 127.0.0.1:8080.
