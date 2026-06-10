@@ -26,6 +26,13 @@ use serde_json::{json, Value};
 /// Discord's custom epoch (2015-01-01T00:00:00Z) in Unix milliseconds.
 const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
+/// Message flag: only the invoking user sees the reply.
+const FLAG_EPHEMERAL: u64 = 1 << 6;
+/// Message flag: opts the message into the components-v2 layout system
+/// (container/text-display/separator). Mutually exclusive with `content`
+/// and `embeds`.
+const FLAG_IS_COMPONENTS_V2: u64 = 1 << 15;
+
 #[derive(Clone)]
 struct AppState {
     verifying_key: VerifyingKey,
@@ -127,16 +134,14 @@ async fn interactions(State(state): State<AppState>, headers: HeaderMap, body: B
                 measure_discord_rtt(),
                 webhook_link_rtt(source_ip.as_deref())
             );
-            let embed =
+            let components =
                 latency_report(&payload, handling_ms, edge_rtt_ms, link_rtt_ms, source_ip);
-            // 4 = CHANNEL_MESSAGE_WITH_SOURCE. flags 64 = EPHEMERAL (only the
-            // invoking user sees the reply).
+            // 4 = CHANNEL_MESSAGE_WITH_SOURCE.
             Json(json!({
                 "type": 4,
                 "data": {
-                    "embeds": [embed],
-                    "components": ping_again_components(),
-                    "flags": 64,
+                    "components": components,
+                    "flags": FLAG_EPHEMERAL | FLAG_IS_COMPONENTS_V2,
                 }
             }))
             .into_response()
@@ -148,10 +153,11 @@ async fn interactions(State(state): State<AppState>, headers: HeaderMap, body: B
     }
 }
 
-/// Build the 🏓 latency report embed from any interaction payload that carries
-/// a snowflake `id` (slash commands and component clicks both do). The embed
-/// color and status dot track the headline Discord -> server delivery time;
-/// diagnostic details (interaction id, webhook source IP) live in the footer.
+/// Build the 🏓 latency report as a components-v2 card from any interaction
+/// payload that carries a snowflake `id` (slash commands and component clicks
+/// both do). The container accent color and status dot track the headline
+/// Discord -> server delivery time; diagnostic details (interaction id,
+/// webhook source IP) sit in small print at the bottom of the card.
 fn latency_report(
     payload: &Value,
     handling_ms: f64,
@@ -179,8 +185,8 @@ fn latency_report(
     };
 
     let delivery_str = match delivery_ms {
-        Some(ms) => format!("{status} **{ms} ms**"),
-        None => format!("{status} n/a"),
+        Some(ms) => format!("{status} **{ms} ms** Discord → Server"),
+        None => format!("{status} Discord → Server: n/a"),
     };
     let source_str = source_ip.unwrap_or_else(|| "n/a".into());
     let id_str = interaction_id
@@ -197,40 +203,42 @@ fn latency_report(
         "handled latency request"
     );
 
-    json!({
-        "title": "🏓 Pong!",
-        "color": color,
-        "fields": [
-            {
-                "name": "Discord → Server",
-                "value": format!("{delivery_str}\n*one-way delivery*"),
-                "inline": true
-            },
-            {
-                "name": "Webhook link",
-                "value": format!("{}\n*kernel TCP RTT, live conn*", fmt_ms(link_rtt_ms)),
-                "inline": true
-            },
-            {
-                "name": "API edge",
-                "value": format!("{}\n*TCP connect, Cloudflare*", fmt_ms(edge_rtt_ms)),
-                "inline": true
-            },
-            {
-                "name": "Server handling",
-                "value": format!("{}\n*verify + parse*", fmt_ms(Some(handling_ms))),
-                "inline": true
-            },
-            {
-                "name": "Measured at",
-                "value": format!("<t:{now_secs}:T>\n<t:{now_secs}:R>"),
-                "inline": true
-            },
-        ],
-        "footer": {
-            "text": format!("Interaction {id_str} • Webhook source {source_str}")
-        },
-    })
+    // Component types: 17 = CONTAINER, 10 = TEXT_DISPLAY, 14 = SEPARATOR.
+    json!([
+        {
+            "type": 17,
+            "accent_color": color,
+            "components": [
+                {
+                    "type": 10,
+                    "content": format!(
+                        "## 🏓 Pong!\n{delivery_str}\n-# one-way delivery, snowflake → arrival"
+                    )
+                },
+                { "type": 14, "divider": true, "spacing": 1 },
+                {
+                    "type": 10,
+                    "content": format!(
+                        "🔗 Webhook link · **{link}**\n-# kernel TCP RTT, live connection\n\
+                         🌐 API edge · **{edge}**\n-# TCP connect, Cloudflare\n\
+                         ⚙️ Server handling · **{handling}**\n-# signature verify + parse",
+                        link = fmt_ms(link_rtt_ms),
+                        edge = fmt_ms(edge_rtt_ms),
+                        handling = fmt_ms(Some(handling_ms)),
+                    )
+                },
+                { "type": 14, "divider": true, "spacing": 1 },
+                {
+                    "type": 10,
+                    "content": format!(
+                        "-# Measured <t:{now_secs}:T> (<t:{now_secs}:R>) • \
+                         Interaction {id_str} • Webhook source {source_str}"
+                    )
+                },
+                ping_again_row(),
+            ]
+        }
+    ])
 }
 
 /// Format a millisecond reading with precision that matches its magnitude:
@@ -284,21 +292,20 @@ async fn measure_discord_rtt() -> Option<f64> {
         .flatten()
 }
 
-/// A single action row holding the "Ping again" button.
-fn ping_again_components() -> Value {
-    json!([
-        {
-            "type": 1, // ACTION_ROW
-            "components": [
-                {
-                    "type": 2,            // BUTTON
-                    "style": 1,           // PRIMARY
-                    "label": "Ping again",
-                    "custom_id": "ping_again"
-                }
-            ]
-        }
-    ])
+/// The action row holding the "Ping again" button, nested inside the report
+/// card so the button renders as part of the container.
+fn ping_again_row() -> Value {
+    json!({
+        "type": 1, // ACTION_ROW
+        "components": [
+            {
+                "type": 2,            // BUTTON
+                "style": 1,           // PRIMARY
+                "label": "Ping again",
+                "custom_id": "ping_again"
+            }
+        ]
+    })
 }
 
 /// Verify the `Ed25519` signature Discord attaches to every request.
