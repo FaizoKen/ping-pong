@@ -4,17 +4,17 @@
 # "Full (strict)"). Caddy terminates TLS and routes by hostname (Caddyfile),
 # so one box serves any number of subdomains/services — no tunnel needed.
 #
-# Alternative path (works, but measurably higher latency): a Cloudflare
-# Tunnel. cloudflared runs as its OWN container on this host (it also serves
-# other tunnels). Attach it once with
-#
+# Alternative path (works, but measurably higher latency, and it disables
+# the kernel-RTT "Webhook link" metric): a Cloudflare Tunnel. The bridge-
+# networked cloudflared container cannot reach a host-networked loopback
+# bind, so first swap the app's `network_mode: host` + `HOST` for
+#   expose: ["8080"]
+# then attach the host's standalone cloudflared once with
 #   docker network connect ping-pong_default cloudflared
-#
 # and point the tunnel's public hostname (Zero Trust dashboard -> Networks ->
 # Tunnels -> Public Hostname) at  http://ping-pong:8080  — the container name
-# and INTERNAL port, not a host port or 127.0.0.1 (loopback inside the
-# cloudflared container is cloudflared itself). Re-run the network connect if
-# cloudflared is ever recreated.
+# and INTERNAL port, never 127.0.0.1 (loopback inside the cloudflared
+# container is cloudflared itself).
 
 services:
   ping-pong:
@@ -27,14 +27,14 @@ services:
       - .env
     environment:
       PORT: "8080"
-    # Reachable by cloudflared over the compose network as `ping-pong:8080`
-    # (the tunnel ingress target — see header comment).
-    expose:
-      - "8080"
-    # Loopback bind for on-box debugging and for host-networked Caddy; public
-    # traffic arrives via the tunnel, so 8080 is never exposed to the internet.
-    ports:
-      - "127.0.0.1:8080:8080"
+      # Loopback-only bind: with host networking the app would otherwise
+      # listen on the public interface; only Caddy needs to reach it.
+      HOST: "127.0.0.1"
+    # Shares the host network namespace so the app can read the kernel's
+    # TCP_INFO (`ss -ti`) for the live connection Discord's webhook sender
+    # holds to Caddy — that RTT is the "Webhook link" line in the /ping
+    # report and is invisible from a bridge-networked container.
+    network_mode: host
     restart: unless-stopped
     healthcheck:
       test:
