@@ -127,14 +127,14 @@ async fn interactions(State(state): State<AppState>, headers: HeaderMap, body: B
                 measure_discord_rtt(),
                 webhook_link_rtt(source_ip.as_deref())
             );
-            let content =
+            let embed =
                 latency_report(&payload, handling_ms, edge_rtt_ms, link_rtt_ms, source_ip);
             // 4 = CHANNEL_MESSAGE_WITH_SOURCE. flags 64 = EPHEMERAL (only the
             // invoking user sees the reply).
             Json(json!({
                 "type": 4,
                 "data": {
-                    "content": content,
+                    "embeds": [embed],
                     "components": ping_again_components(),
                     "flags": 64,
                 }
@@ -148,16 +148,19 @@ async fn interactions(State(state): State<AppState>, headers: HeaderMap, body: B
     }
 }
 
-/// Build the 🏓 latency report from any interaction payload that carries a
-/// snowflake `id` (slash commands and component clicks both do).
+/// Build the 🏓 latency report embed from any interaction payload that carries
+/// a snowflake `id` (slash commands and component clicks both do). The embed
+/// color and status dot track the headline Discord -> server delivery time;
+/// diagnostic details (interaction id, webhook source IP) live in the footer.
 fn latency_report(
     payload: &Value,
     handling_ms: f64,
     edge_rtt_ms: Option<f64>,
     link_rtt_ms: Option<f64>,
     source_ip: Option<String>,
-) -> String {
+) -> Value {
     let now_ms = unix_millis() as i64;
+    let now_secs = now_ms / 1000;
 
     let interaction_id = payload
         .get("id")
@@ -167,17 +170,17 @@ fn latency_report(
     // Discord -> server delivery latency, derived from the snowflake.
     let delivery_ms = interaction_id.map(|id| now_ms - snowflake_timestamp_ms(id) as i64);
 
+    // Discord brand palette: green / yellow / red / greyple.
+    let (color, status) = match delivery_ms {
+        Some(ms) if ms <= 150 => (0x57F287, "🟢"),
+        Some(ms) if ms <= 300 => (0xFEE75C, "🟡"),
+        Some(_) => (0xED4245, "🔴"),
+        None => (0x99AAB5, "⚪"),
+    };
+
     let delivery_str = match delivery_ms {
-        Some(ms) => format!("{ms} ms"),
-        None => "n/a".to_string(),
-    };
-    let link_str = match link_rtt_ms {
-        Some(ms) => format!("{ms:.3} ms (kernel TCP, live conn)"),
-        None => "n/a".to_string(),
-    };
-    let edge_str = match edge_rtt_ms {
-        Some(ms) => format!("{ms:.3} ms (Cloudflare, outbound API)"),
-        None => "n/a".to_string(),
+        Some(ms) => format!("{status} **{ms} ms**"),
+        None => format!("{status} n/a"),
     };
     let source_str = source_ip.unwrap_or_else(|| "n/a".into());
     let id_str = interaction_id
@@ -194,27 +197,50 @@ fn latency_report(
         "handled latency request"
     );
 
-    format!(
-        concat!(
-            "🏓 **Pong!**\n",
-            "```\n",
-            "Discord -> server : {delivery}\n",
-            "Webhook link RTT  : {link}\n",
-            "API edge RTT      : {edge}\n",
-            "Server handling   : {handling:.3} ms\n",
-            "Webhook source    : {source}\n",
-            "Interaction id    : {id}\n",
-            "Measured at       : {now} (unix ms)\n",
-            "```"
-        ),
-        delivery = delivery_str,
-        link = link_str,
-        edge = edge_str,
-        handling = handling_ms,
-        source = source_str,
-        id = id_str,
-        now = now_ms,
-    )
+    json!({
+        "title": "🏓 Pong!",
+        "color": color,
+        "fields": [
+            {
+                "name": "Discord → Server",
+                "value": format!("{delivery_str}\n*one-way delivery*"),
+                "inline": true
+            },
+            {
+                "name": "Webhook link",
+                "value": format!("{}\n*kernel TCP RTT, live conn*", fmt_ms(link_rtt_ms)),
+                "inline": true
+            },
+            {
+                "name": "API edge",
+                "value": format!("{}\n*TCP connect, Cloudflare*", fmt_ms(edge_rtt_ms)),
+                "inline": true
+            },
+            {
+                "name": "Server handling",
+                "value": format!("{}\n*verify + parse*", fmt_ms(Some(handling_ms))),
+                "inline": true
+            },
+            {
+                "name": "Measured at",
+                "value": format!("<t:{now_secs}:T>\n<t:{now_secs}:R>"),
+                "inline": true
+            },
+        ],
+        "footer": {
+            "text": format!("Interaction {id_str} • Webhook source {source_str}")
+        },
+    })
+}
+
+/// Format a millisecond reading with precision that matches its magnitude:
+/// microsecond detail only matters for sub-millisecond values.
+fn fmt_ms(ms: Option<f64>) -> String {
+    match ms {
+        Some(ms) if ms < 1.0 => format!("{ms:.3} ms"),
+        Some(ms) => format!("{ms:.1} ms"),
+        None => "n/a".to_string(),
+    }
 }
 
 /// Read the kernel-measured smoothed RTT of the live TCP connection from the
