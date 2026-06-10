@@ -9,13 +9,13 @@ services:
       - .env
     environment:
       PORT: "8080"
-    # Reachable by Caddy over the internal compose network as `ping-pong:8080`.
-    expose:
-      - "8080"
-    # Bind to localhost only for on-box debugging; public traffic arrives via
-    # Caddy over HTTPS, so 8080 is never exposed to the internet directly.
-    ports:
-      - "127.0.0.1:8080:8080"
+      # Loopback-only bind: with host networking the app would otherwise
+      # listen on the public interface; only Caddy needs to reach it.
+      HOST: "127.0.0.1"
+    # Shares the host network namespace so the app can read the kernel's
+    # TCP_INFO (`ss -ti`) for the live connection Discord's webhook sender
+    # holds to Caddy — that RTT is reported in the /ping message.
+    network_mode: host
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]

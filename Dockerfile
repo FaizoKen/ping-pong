@@ -18,9 +18,11 @@ RUN touch src/main.rs && cargo build --release
 # ---- Runtime stage -------------------------------------------------------
 FROM debian:bookworm-slim
 
-# ca-certificates for outbound TLS; wget powers the container HEALTHCHECK.
+# ca-certificates for outbound TLS; wget powers the container HEALTHCHECK;
+# iproute2 provides `ss`, which the app uses to read the kernel's TCP RTT for
+# the live connection from Discord's webhook sender (host network namespace).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates wget \
+    && apt-get install -y --no-install-recommends ca-certificates wget iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as a non-root user.

@@ -5,7 +5,7 @@ edition = "2021"
 description = "A Discord Interactions Endpoint that replies to /ping with detailed latency"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "process"] }
 axum = "0.7"
 dotenvy = "0.15"
 ed25519-dalek = "2"

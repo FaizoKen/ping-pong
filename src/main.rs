@@ -65,7 +65,12 @@ async fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // HOST lets the compose file pin the bind to loopback when the container
+    // runs with host networking (public traffic must only enter via Caddy).
+    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into());
+    let addr: SocketAddr = format!("{host}:{port}")
+        .parse()
+        .expect("HOST/PORT must form a valid socket address");
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -109,17 +114,21 @@ async fn interactions(State(state): State<AppState>, headers: HeaderMap, body: B
         // 2 = APPLICATION_COMMAND (slash command), 3 = MESSAGE_COMPONENT (button click).
         // Both reply with a fresh latency report as a new message + a "Ping again" button.
         Some(2) | Some(3) => {
-            // Snapshot handling time before the outbound probe so the report
-            // reflects verify+parse work, not the probe's round trip.
+            // Snapshot handling time before the outbound probes so the report
+            // reflects verify+parse work, not the probes' round trips.
             let handling_ms = received_at.elapsed().as_secs_f64() * 1000.0;
-            let discord_rtt_ms = measure_discord_rtt().await;
             // Caddy forwards the original client (Discord's webhook sender) here.
             let source_ip = headers
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.split(',').next())
                 .map(|s| s.trim().to_string());
-            let content = latency_report(&payload, handling_ms, discord_rtt_ms, source_ip);
+            let (edge_rtt_ms, link_rtt_ms) = tokio::join!(
+                measure_discord_rtt(),
+                webhook_link_rtt(source_ip.as_deref())
+            );
+            let content =
+                latency_report(&payload, handling_ms, edge_rtt_ms, link_rtt_ms, source_ip);
             // 4 = CHANNEL_MESSAGE_WITH_SOURCE. flags 64 = EPHEMERAL (only the
             // invoking user sees the reply).
             Json(json!({
@@ -144,7 +153,8 @@ async fn interactions(State(state): State<AppState>, headers: HeaderMap, body: B
 fn latency_report(
     payload: &Value,
     handling_ms: f64,
-    discord_rtt_ms: Option<f64>,
+    edge_rtt_ms: Option<f64>,
+    link_rtt_ms: Option<f64>,
     source_ip: Option<String>,
 ) -> String {
     let now_ms = unix_millis() as i64;
@@ -161,8 +171,12 @@ fn latency_report(
         Some(ms) => format!("{ms} ms"),
         None => "n/a".to_string(),
     };
-    let rtt_str = match discord_rtt_ms {
-        Some(ms) => format!("{ms:.3} ms (TCP rtt to edge)"),
+    let link_str = match link_rtt_ms {
+        Some(ms) => format!("{ms:.3} ms (kernel TCP, live conn)"),
+        None => "n/a".to_string(),
+    };
+    let edge_str = match edge_rtt_ms {
+        Some(ms) => format!("{ms:.3} ms (Cloudflare, outbound API)"),
         None => "n/a".to_string(),
     };
     let source_str = source_ip.unwrap_or_else(|| "n/a".into());
@@ -173,7 +187,8 @@ fn latency_report(
     tracing::info!(
         interaction_id = %id_str,
         delivery_ms = ?delivery_ms,
-        discord_rtt_ms = ?discord_rtt_ms,
+        link_rtt_ms = ?link_rtt_ms,
+        edge_rtt_ms = ?edge_rtt_ms,
         source_ip = %source_str,
         handling_ms = handling_ms,
         "handled latency request"
@@ -184,7 +199,8 @@ fn latency_report(
             "🏓 **Pong!**\n",
             "```\n",
             "Discord -> server : {delivery}\n",
-            "Server -> Discord : {rtt}\n",
+            "Webhook link RTT  : {link}\n",
+            "API edge RTT      : {edge}\n",
             "Server handling   : {handling:.3} ms\n",
             "Webhook source    : {source}\n",
             "Interaction id    : {id}\n",
@@ -192,12 +208,32 @@ fn latency_report(
             "```"
         ),
         delivery = delivery_str,
-        rtt = rtt_str,
+        link = link_str,
+        edge = edge_str,
         handling = handling_ms,
         source = source_str,
         id = id_str,
         now = now_ms,
     )
+}
+
+/// Read the kernel-measured smoothed RTT of the live TCP connection from the
+/// webhook sender — the true network distance to the machine that delivered
+/// this very interaction. Works because the container shares the host network
+/// namespace: the connection Discord holds to Caddy is visible to `ss` here
+/// even though the app itself sits behind the proxy on loopback.
+async fn webhook_link_rtt(source_ip: Option<&str>) -> Option<f64> {
+    // Parse strictly as an IP before using it as a filter argument.
+    let ip: std::net::IpAddr = source_ip?.parse().ok()?;
+    let output = tokio::process::Command::new("ss")
+        .args(["-Htin", "dst", &ip.to_string()])
+        .output()
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    // `ss -i` emits e.g. `... rtt:1.427/1.672 ...` — smoothed rtt / variance.
+    let rest = &text[text.find("rtt:")? + 4..];
+    rest[..rest.find('/')?].parse().ok()
 }
 
 /// Measure the network round trip toward Discord by timing a TCP handshake to
